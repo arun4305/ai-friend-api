@@ -1,4 +1,12 @@
+# Core Web Framework
 Flask==2.3.3
-flask-cors==4.0.0
-PyMySQL==1.1.0
-gunicorn==21.2.0
+Flask-CORS==4.0.0
+
+# Database (Optional - if using MySQL/XAMPP)
+# mysql-connector-python==8.1.0
+
+# No external database needed - In-memory database used
+# All data is loaded from Python structures
+
+# Development Tools (Optional)
+python-dotenv==1.0.0
