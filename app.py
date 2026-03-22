@@ -6,8 +6,8 @@ Supports 8 Friends: Arun, Krishna, Vetri, Thamizh, Oviya, Gayathri, Vicky, Priya
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import mysql.connector
-from mysql.connector import Error
+import pymysql
+from pymysql import Error
 import json
 import random
 import re
@@ -28,7 +28,7 @@ class Config:
     DB_PASSWORD = os.environ.get('DB_PASSWORD', '')
     DB_NAME = os.environ.get('DB_NAME', 'ai_friend_system')
     
-    # For Render MySQL, we need to handle the full URL format
+    # For Render MySQL, handle full URL format
     DATABASE_URL = os.environ.get('DATABASE_URL', '')
     
     # Server Configuration
@@ -71,25 +71,25 @@ class DatabaseHandler:
             db_config = self.parse_database_url()
             
             if db_config:
-                self.connection = mysql.connector.connect(
+                self.connection = pymysql.connect(
                     host=db_config['host'],
                     user=db_config['user'],
                     password=db_config['password'],
                     database=db_config['database'],
                     port=db_config['port'],
                     charset='utf8mb4',
-                    use_unicode=True,
+                    cursorclass=pymysql.cursors.DictCursor,
                     connect_timeout=30
                 )
             else:
                 # Use individual environment variables
-                self.connection = mysql.connector.connect(
+                self.connection = pymysql.connect(
                     host=Config.DB_HOST,
                     user=Config.DB_USER,
                     password=Config.DB_PASSWORD,
                     database=Config.DB_NAME,
                     charset='utf8mb4',
-                    use_unicode=True,
+                    cursorclass=pymysql.cursors.DictCursor,
                     connect_timeout=30
                 )
             
@@ -98,15 +98,6 @@ class DatabaseHandler:
             
         except Error as e:
             print(f"✗ Database connection error: {e}")
-            print(f"  Connection details:")
-            print(f"  Host: {Config.DB_HOST}")
-            print(f"  Database: {Config.DB_NAME}")
-            print(f"  User: {Config.DB_USER}")
-            
-            if Config.DATABASE_URL:
-                print("  Using DATABASE_URL connection string")
-            
-            # Don't raise exception - allow app to continue in development
             if Config.DEBUG:
                 print("  Running in debug mode - continuing without database")
                 return False
@@ -117,13 +108,12 @@ class DatabaseHandler:
         """Execute query and return results"""
         if not self.connection:
             if Config.DEBUG:
-                print("Database not connected - returning empty result")
                 return [] if query.strip().upper().startswith('SELECT') else True
             return None
             
         cursor = None
         try:
-            cursor = self.connection.cursor(dictionary=True)
+            cursor = self.connection.cursor()
             cursor.execute(query, params or ())
             
             if query.strip().upper().startswith('SELECT'):
@@ -332,7 +322,6 @@ class AIResponseHandler:
         """Generate personalized response"""
         
         name = user_profile['name']
-        style = user_profile.get('communication_style', 'Friendly')
         
         # Check training data first
         training_response = self.check_training_data(user_profile['id'], message, name)
@@ -368,24 +357,6 @@ class AIResponseHandler:
                 f"That's awesome, {name}! What are you building? 💻",
                 f"Tech is fascinating! Tell me more about your project! 🚀",
                 f"Coding is like magic! What language are you working with? ✨"
-            ]
-            return random.choice(responses)
-        
-        # Art/Creative
-        if any(word in message_lower for word in ['art', 'draw', 'paint', 'design']):
-            responses = [
-                f"Art is beautiful, {name}! What are you creating? 🎨",
-                f"I love hearing about creative projects! Tell me more! ✨",
-                f"That sounds amazing! What's your inspiration? 🌈"
-            ]
-            return random.choice(responses)
-        
-        # Travel
-        if any(word in message_lower for word in ['travel', 'trip', 'vacation']):
-            responses = [
-                f"Travel is life-changing, {name}! Where are you planning to go? ✈️",
-                f"I love travel stories! Tell me about your adventures! 🌍",
-                f"Exploring new places is amazing! Where's your next destination? 🗺️"
             ]
             return random.choice(responses)
         
@@ -446,7 +417,7 @@ class AIResponseHandler:
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)  # Enable CORS for Flutter
+CORS(app)
 
 # Initialize components
 db = DatabaseHandler()
@@ -489,7 +460,6 @@ def chat():
         # Get user profile
         user_profile = db.get_user_profile(user_id)
         if not user_profile:
-            # Return default response if user not found
             return jsonify({
                 'response': f"Hello! I'm your AI friend. How can I help you today? 😊",
                 'user_id': user_id,
@@ -660,53 +630,6 @@ def seed_sample_conversations():
         print(f"Error seeding conversations: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/clear-history/<int:user_id>', methods=['DELETE'])
-def clear_user_history(user_id):
-    """Clear conversation history for a user"""
-    try:
-        query = "DELETE FROM conversations WHERE user_id = %s"
-        db.execute_query(query, (user_id,))
-        return jsonify({'success': True, 'message': 'History cleared'})
-    except Exception as e:
-        print(f"Error clearing history: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/training-data/<int:user_id>', methods=['GET'])
-def get_training_data(user_id):
-    """Get training data for a user"""
-    try:
-        query = "SELECT * FROM ai_training_data WHERE user_id = %s ORDER BY priority DESC"
-        data = db.execute_query(query, (user_id,))
-        return jsonify({'training_data': data or []})
-    except Exception as e:
-        print(f"Error getting training data: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/training-data', methods=['POST'])
-def add_training_data():
-    """Add training data for a user"""
-    try:
-        data = request.get_json()
-        user_id = data.get('user_id')
-        trigger_pattern = data.get('trigger_pattern')
-        response_template = data.get('response_template')
-        context = data.get('context', 'general')
-        priority = data.get('priority', 5)
-        
-        if not all([user_id, trigger_pattern, response_template]):
-            return jsonify({'error': 'Missing required fields'}), 400
-        
-        query = """
-            INSERT INTO ai_training_data (user_id, trigger_pattern, response_template, context, priority)
-            VALUES (%s, %s, %s, %s, %s)
-        """
-        db.execute_query(query, (user_id, trigger_pattern, response_template, context, priority))
-        
-        return jsonify({'success': True, 'message': 'Training data added'})
-    except Exception as e:
-        print(f"Error adding training data: {e}")
-        return jsonify({'error': str(e)}), 500
-
 # ==================== MAIN ENTRY POINT ====================
 
 if __name__ == '__main__':
@@ -718,27 +641,12 @@ if __name__ == '__main__':
     print("👥 Friends: Arun, Krishna, Vetri, Thamizh, Oviya, Gayathri, Vicky, Priya")
     print("="*60)
     print("\n📡 API Endpoints:")
-    print("   POST   /api/chat            - Send message to AI")
-    print("   GET    /api/users           - List all friends")
-    print("   GET    /api/user/<id>       - Get friend profile")
-    print("   GET    /api/user/<id>/history - Get conversation history")
-    print("   POST   /api/init            - Initialize database")
-    print("   POST   /api/seed            - Seed sample conversations")
-    print("   DELETE /api/clear-history/<id> - Clear user history")
-    print("   GET    /api/training-data/<id> - Get training data")
-    print("   POST   /api/training-data   - Add training data")
-    print("   GET    /api/health          - Health check")
+    print("   POST /api/chat     - Send message to AI")
+    print("   GET  /api/users    - List all friends")
+    print("   GET  /api/user/<id> - Get friend profile")
+    print("   POST /api/init     - Initialize database")
+    print("   GET  /api/health   - Health check")
     print("="*60 + "\n")
-    
-    # Initialize database tables if connected
-    if db.connection:
-        try:
-            db.initialize_database()
-            print("✓ Database tables ready")
-        except Exception as e:
-            print(f"⚠️  Database initialization warning: {e}")
-    else:
-        print("⚠️  Running without database connection")
     
     # Run Flask app
     app.run(
