@@ -2,11 +2,8 @@
 Flask==2.3.3
 Flask-CORS==4.0.0
 
-# Database (Optional - if using MySQL/XAMPP)
-# mysql-connector-python==8.1.0
+# Server (REQUIRED for Render)
+gunicorn==21.2.0
 
-# No external database needed - In-memory database used
-# All data is loaded from Python structures
-
-# Development Tools (Optional)
+# Environment variables
 python-dotenv==1.0.0
