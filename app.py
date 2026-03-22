@@ -1,5 +1,5 @@
 """
-AI Friend System - Complete Python Backend
+AI Friend System - Complete Python Backend for Render Deployment
 Flask + MySQL + AI Response Handler
 Supports 8 Friends: Arun, Krishna, Vetri, Thamizh, Oviya, Gayathri, Vicky, Priya
 """
@@ -13,21 +13,28 @@ import random
 import re
 from datetime import datetime
 import logging
+import os
+import sys
 from typing import Dict, List, Optional
+from time import time
+import urllib.parse
 
 # ==================== CONFIGURATION ====================
 
 class Config:
-    # Database Configuration (XAMPP)
-    DB_HOST = 'localhost'
-    DB_USER = 'root'
-    DB_PASSWORD = ''  # XAMPP default password is empty
-    DB_NAME = 'ai_friend_system'
+    # Database Configuration - Use environment variables for Render
+    DB_HOST = os.environ.get('DB_HOST', 'localhost')
+    DB_USER = os.environ.get('DB_USER', 'root')
+    DB_PASSWORD = os.environ.get('DB_PASSWORD', '')
+    DB_NAME = os.environ.get('DB_NAME', 'ai_friend_system')
+    
+    # For Render MySQL, we need to handle the full URL format
+    DATABASE_URL = os.environ.get('DATABASE_URL', '')
     
     # Server Configuration
     API_HOST = '0.0.0.0'
-    API_PORT = 5000
-    DEBUG = True
+    API_PORT = int(os.environ.get('PORT', 5000))
+    DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
     
     # AI Configuration
     USE_LOCAL_AI = True
@@ -43,23 +50,77 @@ class DatabaseHandler:
         self.connection = None
         self.connect()
     
+    def parse_database_url(self):
+        """Parse database URL if provided"""
+        if Config.DATABASE_URL:
+            # Parse MySQL URL format: mysql://username:password@host:port/database
+            parsed = urllib.parse.urlparse(Config.DATABASE_URL)
+            return {
+                'host': parsed.hostname,
+                'user': parsed.username,
+                'password': parsed.password,
+                'database': parsed.path[1:] if parsed.path else Config.DB_NAME,
+                'port': parsed.port or 3306
+            }
+        return None
+    
     def connect(self):
         """Establish database connection"""
         try:
-            self.connection = mysql.connector.connect(
-                host=Config.DB_HOST,
-                user=Config.DB_USER,
-                password=Config.DB_PASSWORD,
-                database=Config.DB_NAME
-            )
+            # Try to use DATABASE_URL first
+            db_config = self.parse_database_url()
+            
+            if db_config:
+                self.connection = mysql.connector.connect(
+                    host=db_config['host'],
+                    user=db_config['user'],
+                    password=db_config['password'],
+                    database=db_config['database'],
+                    port=db_config['port'],
+                    charset='utf8mb4',
+                    use_unicode=True,
+                    connect_timeout=30
+                )
+            else:
+                # Use individual environment variables
+                self.connection = mysql.connector.connect(
+                    host=Config.DB_HOST,
+                    user=Config.DB_USER,
+                    password=Config.DB_PASSWORD,
+                    database=Config.DB_NAME,
+                    charset='utf8mb4',
+                    use_unicode=True,
+                    connect_timeout=30
+                )
+            
             print("✓ Database connected successfully")
+            return True
+            
         except Error as e:
             print(f"✗ Database connection error: {e}")
-            print("   Make sure XAMPP MySQL is running")
-            raise
+            print(f"  Connection details:")
+            print(f"  Host: {Config.DB_HOST}")
+            print(f"  Database: {Config.DB_NAME}")
+            print(f"  User: {Config.DB_USER}")
+            
+            if Config.DATABASE_URL:
+                print("  Using DATABASE_URL connection string")
+            
+            # Don't raise exception - allow app to continue in development
+            if Config.DEBUG:
+                print("  Running in debug mode - continuing without database")
+                return False
+            else:
+                raise
     
     def execute_query(self, query: str, params: tuple = None) -> Optional[List[Dict]]:
         """Execute query and return results"""
+        if not self.connection:
+            if Config.DEBUG:
+                print("Database not connected - returning empty result")
+                return [] if query.strip().upper().startswith('SELECT') else True
+            return None
+            
         cursor = None
         try:
             cursor = self.connection.cursor(dictionary=True)
@@ -74,7 +135,8 @@ class DatabaseHandler:
                 
         except Error as e:
             print(f"Query error: {e}")
-            self.connection.rollback()
+            if self.connection:
+                self.connection.rollback()
             raise
         finally:
             if cursor:
@@ -136,90 +198,98 @@ class DatabaseHandler:
     
     def initialize_database(self):
         """Create tables if they don't exist"""
+        if not self.connection:
+            print("No database connection - skipping table creation")
+            return
         
-        # Create users table
-        self.execute_query("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INT PRIMARY KEY AUTO_INCREMENT,
-                name VARCHAR(100) NOT NULL,
-                age INT,
-                occupation VARCHAR(100),
-                interests TEXT,
-                personality_type VARCHAR(50),
-                communication_style VARCHAR(50),
-                preferred_language VARCHAR(50) DEFAULT 'English',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Create conversations table
-        self.execute_query("""
-            CREATE TABLE IF NOT EXISTS conversations (
-                id INT PRIMARY KEY AUTO_INCREMENT,
-                user_id INT,
-                message TEXT,
-                response TEXT,
-                sentiment_score FLOAT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            )
-        """)
-        
-        # Create user_knowledge table
-        self.execute_query("""
-            CREATE TABLE IF NOT EXISTS user_knowledge (
-                id INT PRIMARY KEY AUTO_INCREMENT,
-                user_id INT,
-                category VARCHAR(100),
-                fact TEXT,
-                importance_level INT DEFAULT 5,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            )
-        """)
-        
-        # Create user_preferences table
-        self.execute_query("""
-            CREATE TABLE IF NOT EXISTS user_preferences (
-                id INT PRIMARY KEY AUTO_INCREMENT,
-                user_id INT UNIQUE,
-                response_length VARCHAR(20) DEFAULT 'medium',
-                emoji_preference BOOLEAN DEFAULT TRUE,
-                humor_level INT DEFAULT 5,
-                formality_level INT DEFAULT 5,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            )
-        """)
-        
-        # Create training data table
-        self.execute_query("""
-            CREATE TABLE IF NOT EXISTS ai_training_data (
-                id INT PRIMARY KEY AUTO_INCREMENT,
-                user_id INT,
-                trigger_pattern VARCHAR(255),
-                response_template TEXT,
-                context VARCHAR(100),
-                priority INT DEFAULT 5,
-                is_active BOOLEAN DEFAULT TRUE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            )
-        """)
-        
-        # Create relationship settings table
-        self.execute_query("""
-            CREATE TABLE IF NOT EXISTS user_relationship_settings (
-                id INT PRIMARY KEY AUTO_INCREMENT,
-                user_id INT UNIQUE,
-                greeting_style VARCHAR(50) DEFAULT 'casual',
-                name_prefix VARCHAR(20),
-                language_preference VARCHAR(20) DEFAULT 'bilingual',
-                emotional_tone VARCHAR(20) DEFAULT 'friendly',
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            )
-        """)
-        
-        print("✓ Database tables created/verified")
+        try:
+            # Create users table
+            self.execute_query("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id INT PRIMARY KEY AUTO_INCREMENT,
+                    name VARCHAR(100) NOT NULL,
+                    age INT,
+                    occupation VARCHAR(100),
+                    interests TEXT,
+                    personality_type VARCHAR(50),
+                    communication_style VARCHAR(50),
+                    preferred_language VARCHAR(50) DEFAULT 'English',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Create conversations table
+            self.execute_query("""
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id INT PRIMARY KEY AUTO_INCREMENT,
+                    user_id INT,
+                    message TEXT,
+                    response TEXT,
+                    sentiment_score FLOAT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Create user_knowledge table
+            self.execute_query("""
+                CREATE TABLE IF NOT EXISTS user_knowledge (
+                    id INT PRIMARY KEY AUTO_INCREMENT,
+                    user_id INT,
+                    category VARCHAR(100),
+                    fact TEXT,
+                    importance_level INT DEFAULT 5,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Create user_preferences table
+            self.execute_query("""
+                CREATE TABLE IF NOT EXISTS user_preferences (
+                    id INT PRIMARY KEY AUTO_INCREMENT,
+                    user_id INT UNIQUE,
+                    response_length VARCHAR(20) DEFAULT 'medium',
+                    emoji_preference BOOLEAN DEFAULT TRUE,
+                    humor_level INT DEFAULT 5,
+                    formality_level INT DEFAULT 5,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Create training data table
+            self.execute_query("""
+                CREATE TABLE IF NOT EXISTS ai_training_data (
+                    id INT PRIMARY KEY AUTO_INCREMENT,
+                    user_id INT,
+                    trigger_pattern VARCHAR(255),
+                    response_template TEXT,
+                    context VARCHAR(100),
+                    priority INT DEFAULT 5,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Create relationship settings table
+            self.execute_query("""
+                CREATE TABLE IF NOT EXISTS user_relationship_settings (
+                    id INT PRIMARY KEY AUTO_INCREMENT,
+                    user_id INT UNIQUE,
+                    greeting_style VARCHAR(50) DEFAULT 'casual',
+                    name_prefix VARCHAR(20),
+                    language_preference VARCHAR(20) DEFAULT 'bilingual',
+                    emotional_tone VARCHAR(20) DEFAULT 'friendly',
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+            """)
+            
+            print("✓ Database tables created/verified")
+            
+        except Error as e:
+            print(f"Error creating tables: {e}")
+            raise
 
 # ==================== AI RESPONSE HANDLER ====================
 
@@ -388,8 +458,6 @@ rate_limits = {}
 
 def check_rate_limit(user_id: int) -> bool:
     """Check if user has exceeded rate limit"""
-    from time import time
-    
     current_time = time()
     if user_id not in rate_limits:
         rate_limits[user_id] = []
@@ -421,7 +489,13 @@ def chat():
         # Get user profile
         user_profile = db.get_user_profile(user_id)
         if not user_profile:
-            return jsonify({'error': 'User not found'}), 404
+            # Return default response if user not found
+            return jsonify({
+                'response': f"Hello! I'm your AI friend. How can I help you today? 😊",
+                'user_id': user_id,
+                'timestamp': datetime.now().isoformat(),
+                'sentiment': 0.5
+            })
         
         # Get user knowledge and history
         user_knowledge = db.get_user_knowledge(user_id)
@@ -435,8 +509,9 @@ def chat():
         # Analyze sentiment
         sentiment = ai_handler.analyze_sentiment(message)
         
-        # Save conversation
-        db.save_conversation(user_id, message, response, sentiment)
+        # Save conversation if database is connected
+        if db.connection:
+            db.save_conversation(user_id, message, response, sentiment)
         
         return jsonify({
             'response': response,
@@ -501,6 +576,9 @@ def health_check():
 def initialize_database():
     """Initialize database with sample data"""
     try:
+        if not db.connection:
+            return jsonify({'error': 'Database not connected'}), 500
+            
         # Create tables
         db.initialize_database()
         
@@ -526,23 +604,107 @@ def initialize_database():
                 """
                 user_id = db.execute_query(query, friend)
                 
-                # Add default preferences
-                pref_query = """
-                    INSERT INTO user_preferences (user_id) VALUES (%s)
-                """
-                db.execute_query(pref_query, (user_id,))
-                
-                # Add relationship settings
-                rel_query = """
-                    INSERT INTO user_relationship_settings (user_id, greeting_style, name_prefix) 
-                    VALUES (%s, %s, %s)
-                """
-                prefix = 'da' if friend[0] == 'Arun' else ''
-                db.execute_query(rel_query, (user_id, 'casual', prefix))
+                if user_id:
+                    # Add default preferences
+                    pref_query = """
+                        INSERT INTO user_preferences (user_id) VALUES (%s)
+                    """
+                    db.execute_query(pref_query, (user_id,))
+                    
+                    # Add relationship settings
+                    rel_query = """
+                        INSERT INTO user_relationship_settings (user_id, greeting_style, name_prefix) 
+                        VALUES (%s, %s, %s)
+                    """
+                    prefix = 'da' if friend[0] == 'Arun' else ''
+                    db.execute_query(rel_query, (user_id, 'casual', prefix))
         
         return jsonify({'success': True, 'message': 'Database initialized successfully'})
     except Exception as e:
         print(f"Error initializing database: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/seed', methods=['POST'])
+def seed_sample_conversations():
+    """Seed sample conversations for testing"""
+    try:
+        if not db.connection:
+            return jsonify({'error': 'Database not connected'}), 500
+            
+        users = db.get_all_users()
+        sample_messages = [
+            "Hi, how are you?",
+            "What's new?",
+            "I'm working on a coding project",
+            "I feel great today!",
+            "Had a tough day at work"
+        ]
+        
+        sample_responses = [
+            "Hey! I'm doing great! How about you?",
+            "Not much, just chatting with friends! You?",
+            "That's awesome! What are you building?",
+            "That's wonderful! Tell me more!",
+            "Sorry to hear that. Want to talk about it?"
+        ]
+        
+        for user in users:
+            for i in range(3):
+                message = random.choice(sample_messages)
+                response = random.choice(sample_responses)
+                sentiment = ai_handler.analyze_sentiment(message)
+                db.save_conversation(user['id'], message, response, sentiment)
+        
+        return jsonify({'success': True, 'message': 'Sample conversations seeded'})
+    except Exception as e:
+        print(f"Error seeding conversations: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clear-history/<int:user_id>', methods=['DELETE'])
+def clear_user_history(user_id):
+    """Clear conversation history for a user"""
+    try:
+        query = "DELETE FROM conversations WHERE user_id = %s"
+        db.execute_query(query, (user_id,))
+        return jsonify({'success': True, 'message': 'History cleared'})
+    except Exception as e:
+        print(f"Error clearing history: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/training-data/<int:user_id>', methods=['GET'])
+def get_training_data(user_id):
+    """Get training data for a user"""
+    try:
+        query = "SELECT * FROM ai_training_data WHERE user_id = %s ORDER BY priority DESC"
+        data = db.execute_query(query, (user_id,))
+        return jsonify({'training_data': data or []})
+    except Exception as e:
+        print(f"Error getting training data: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/training-data', methods=['POST'])
+def add_training_data():
+    """Add training data for a user"""
+    try:
+        data = request.get_json()
+        user_id = data.get('user_id')
+        trigger_pattern = data.get('trigger_pattern')
+        response_template = data.get('response_template')
+        context = data.get('context', 'general')
+        priority = data.get('priority', 5)
+        
+        if not all([user_id, trigger_pattern, response_template]):
+            return jsonify({'error': 'Missing required fields'}), 400
+        
+        query = """
+            INSERT INTO ai_training_data (user_id, trigger_pattern, response_template, context, priority)
+            VALUES (%s, %s, %s, %s, %s)
+        """
+        db.execute_query(query, (user_id, trigger_pattern, response_template, context, priority))
+        
+        return jsonify({'success': True, 'message': 'Training data added'})
+    except Exception as e:
+        print(f"Error adding training data: {e}")
         return jsonify({'error': str(e)}), 500
 
 # ==================== MAIN ENTRY POINT ====================
@@ -552,24 +714,31 @@ if __name__ == '__main__':
     print("🤖 AI FRIEND SYSTEM - STARTING...")
     print("="*60)
     print(f"📱 Server: http://{Config.API_HOST}:{Config.API_PORT}")
-    print(f"🗄️  Database: MySQL (XAMPP)")
+    print(f"🗄️  Database: MySQL ({'Connected' if db.connection else 'Disconnected'})")
     print("👥 Friends: Arun, Krishna, Vetri, Thamizh, Oviya, Gayathri, Vicky, Priya")
     print("="*60)
     print("\n📡 API Endpoints:")
-    print("   POST /api/chat     - Send message to AI")
-    print("   GET  /api/users    - List all friends")
-    print("   GET  /api/user/<id> - Get friend profile")
-    print("   POST /api/init     - Initialize database")
-    print("   GET  /api/health   - Health check")
+    print("   POST   /api/chat            - Send message to AI")
+    print("   GET    /api/users           - List all friends")
+    print("   GET    /api/user/<id>       - Get friend profile")
+    print("   GET    /api/user/<id>/history - Get conversation history")
+    print("   POST   /api/init            - Initialize database")
+    print("   POST   /api/seed            - Seed sample conversations")
+    print("   DELETE /api/clear-history/<id> - Clear user history")
+    print("   GET    /api/training-data/<id> - Get training data")
+    print("   POST   /api/training-data   - Add training data")
+    print("   GET    /api/health          - Health check")
     print("="*60 + "\n")
     
-    # Initialize database
-    try:
-        db.initialize_database()
-        print("✓ Database ready")
-    except Exception as e:
-        print(f"⚠️  Database initialization warning: {e}")
-        print("   Make sure XAMPP MySQL is running")
+    # Initialize database tables if connected
+    if db.connection:
+        try:
+            db.initialize_database()
+            print("✓ Database tables ready")
+        except Exception as e:
+            print(f"⚠️  Database initialization warning: {e}")
+    else:
+        print("⚠️  Running without database connection")
     
     # Run Flask app
     app.run(
